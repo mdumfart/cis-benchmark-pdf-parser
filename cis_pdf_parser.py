@@ -8,6 +8,13 @@ import argparse
 import sys
 import unittest
 
+
+def replaceUF0b7(row):
+    for i in range(0, len(row)):
+        row[i] = row[i].replace("\uf0b7", "*")
+    return row
+
+
 def main():
     # Initialize variables
     (
@@ -20,7 +27,8 @@ def main():
         defval_count,
         cis_count,
     ) = (0,) * 8
-    firstPage = None
+    first_page = None
+    last_page = None
     seenList = []
 
     # Setup console logging
@@ -73,6 +81,8 @@ def main():
                 pattern = "(\d+(?:\.\d+)+)\s\(((L[12])|(NG))\)(.*?)(\(Automated\)|\(Manual\))"
             elif "Microsoft Windows 10 Enterprise" in CISName:
                 pattern = "(\d+(?:\.\d+)+)\s\(((L[12])|(NG)|(BL))\)(.*?)(\(Automated\)|\(Manual\))"
+            elif "Kubernetes" in CISName:
+                pattern = "(\d+(?:\.\d+)+)\s(.*)(\(Scored\)|\(Not Scored\))"
             else:
                 raise ValueError("Could not find a matching regex for {}".format(CISName))
     except IndexError:
@@ -81,26 +91,39 @@ def main():
 
     # Skip to actual rules
     for currentPage in range(len(doc)):
-        findPage = doc.loadPage(currentPage)
+        find_page = doc.loadPage(currentPage)
         # logger.debug("Page number : {}".format(currentPage.__index__()))
         # logger.debug(findPage.get_text())
-        if findPage.searchFor("Recommendations 1 "):
-            firstPage = currentPage
+        if find_page.searchFor("Recommendations 1 "):
+            first_page = currentPage
+            break
+
+    # Skip table of contents appendix
+    for currentPage in range(len(doc)):
+        find_page = doc.loadPage(currentPage)
+        if find_page.searchFor("Appendix: ") and (currentPage > 30):
+            last_page = currentPage - 1
+            break
 
     # If no "Recommendations" and "Initial Setup" it is not a full CIS Benchmark .pdf file
-    if firstPage is None:
+    if first_page is None:
         logger.error("*** Not a CIS PDF Benchmark, exiting. ***")
+        exit()
+
+    if last_page is None:
+        logger.error("*** Could not find last page, exiting. ***")
         exit()
 
     logger.info("*** Total Number of Pages: %i ***", doc.pageCount)
 
     # Open output .csv file for writing
-    with open(args.out_file, mode="w") as cis_outfile:
+    with open(args.out_file, mode="w", newline='') as cis_outfile:
         rule_writer = csv.writer(
             cis_outfile, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL
         )
         rule_writer.writerow(
             [
+                "RuleId",
                 "Rule",
                 "Profile Applicability",
                 "Description",
@@ -108,12 +131,12 @@ def main():
                 "Audit",
                 "Remediation",
                 "Default Value",
-                "CIS Controls",
+                # "CIS Controls",
             ]
         )
 
         # Loop through all PDF pages
-        for page in range(firstPage, len(doc)):
+        for page in range(first_page + 1, last_page):
             if page < len(doc):
                 data = doc.loadPage(page).getText("text")
                 logger.info("*** Parsing Page Number: %i ***", page)
@@ -121,8 +144,13 @@ def main():
                 # Get rule by matching regex pattern for x.x.* (Automated) or (Manual), there are no "x.*" we care about
                 try:
                     rerule = re.search(pattern, data, re.DOTALL)
+
                     if rerule is not None:
-                        rule = rerule.group()
+                        full_rule = rerule.group()
+                        split_rule = full_rule.split(" ", 1)
+                        rule_id = split_rule[0]
+                        rule = split_rule[1]
+
                         rule_count += 1
                 except IndexError:
                     logger.info("*** Page does not contain a Rule Name ***")
@@ -132,8 +160,8 @@ def main():
                 # Get Profile Applicability by splits as it is always between Profile App. and Description, faster than regex
                 try:
                     l_post = data.split("Profile Applicability:", 1)[1]
-                    level = l_post.partition("Description:")[0].strip()
-                    level = re.sub("[^a-zA-Z0-9\\n-]+", " ", level)
+                    level = l_post.partition("Description:")[0]
+                    level = re.sub("[^a-zA-Z0-9\\n-]+", " ", level).strip()
                     level_count += 1
                 except IndexError:
                     logger.info("*** Page does not contain Profile Levels ***")
@@ -141,7 +169,7 @@ def main():
                 # Get Description by splits as it is always between Description and Rationale, faster than regex
                 try:
                     d_post = data.split("Description:", 1)[1]
-                    description = d_post.partition("Rationale")[0].strip()
+                    description = d_post.partition("Rationale:")[0].strip()
                     description_count += 1
                 except IndexError:
                     logger.info("*** Page does not contain Description ***")
@@ -180,40 +208,44 @@ def main():
                 except IndexError:
                     logger.info("*** Page does not contain Default Value ***")
 
-                # Get CIS Controls by splits as they are always between CIS Controls and P a g e, regex the result
-                try:
-                    cis_post = data.split("CIS Controls:", 1)[1]
-                    cis = cis_post.partition("P a g e")[0].strip()
-                    cis = re.sub("[^a-zA-Z0-9\\n.-]+", " ", cis)
-                    cis_count += 1
-                    # Incrementing defval_count if cis_count is found as Default Value is not always present (ex: RHEL7)
-                    if defval_count == (cis_count-1):
-                        defval = ""
-                        defval_count += 1
-                except IndexError:
-                    logger.info("*** Page does not contain CIS Controls ***")
+                # # Get CIS Controls by splits as they are always between CIS Controls and P a g e, regex the result
+                # try:
+                #     cis_post = data.split("CIS Controls:", 1)[1]
+                #     cis = cis_post.partition("P a g e")[0].strip()
+                #     cis = re.sub("[^a-zA-Z0-9\\n.-]+", " ", cis)
+                #     cis_count += 1
+                #     # Incrementing defval_count if cis_count is found as Default Value is not always present (ex: RHEL7)
+                #     if defval_count == (cis_count-1):
+                #         defval = ""
+                #         defval_count += 1
+                # except IndexError:
+                #     logger.info("*** Page does not contain CIS Controls ***")
 
                 # We only write to csv if a parsed rule is fully assembled
-                if rule_count:
-                    row_count = [
-                        rule_count,
-                        level_count,
-                        description_count,
-                        rat_count,
-                        acnt,
-                        rem_count,
-                        defval_count,
-                        cis_count,
-                    ]
-                    logging.debug(row_count)
-                    if row_count.count(row_count[0]) == len(row_count):
-                        # Have we seen this rule before? If not, write it to file
-                        if row_count not in seenList:
-                            seenList = [row_count]
-                            logger.info("*** Writing the following rule to csv: ***")
-                            row = [rule, level, description, rat, audit, rem, defval, cis]
-                            logger.info(row)
-                            rule_writer.writerow(row)
+                row_count = [
+                    rule_count,
+                    level_count,
+                    description_count,
+                    rat_count,
+                    acnt,
+                    rem_count,
+                    defval_count,
+                    # cis_count,
+                ]
+
+                logging.debug(row_count)
+
+                # Have we seen this rule before? If not, write it to file
+                if row_count not in seenList:
+                    seenList = [row_count]
+                    logger.info("*** Writing the following rule to csv: ***")
+                    row = [rule_id, rule, level, description, rat, audit, rem, defval]
+                    # row = [rule, level, description, rat, audit, rem, defval, cis]
+
+                    row = replaceUF0b7(row)
+
+                    logger.info(row)
+                    rule_writer.writerow(row)
                 page += 1
             else:
                 logger.info("*** All pages parsed, exiting. ***")
