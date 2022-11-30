@@ -15,6 +15,19 @@ def replaceUF0b7(row):
     return row
 
 
+def cleanHeaders(row):
+    header_pattern = "(\d+(?:\.\d+)+)"
+    rerule_id = re.search(header_pattern, row[1])
+
+    if rerule_id is not None:
+        rule_id = rerule_id.group()
+
+        if row[0] in rule_id:
+            row[0] = rule_id
+            row[1] = row[1][row[1].index(rule_id) + len(rule_id):len(row[1])].strip()
+
+    return row
+
 def main():
     # Initialize variables
     (
@@ -82,7 +95,7 @@ def main():
             elif "Microsoft Windows 10 Enterprise" in CISName:
                 pattern = "(\d+(?:\.\d+)+)\s\(((L[12])|(NG)|(BL))\)(.*?)(\(Automated\)|\(Manual\))"
             elif "Kubernetes" in CISName:
-                pattern = "(\d+(?:\.\d+)+)\s(.*)(\(Scored\)|\(Not Scored\))"
+                pattern = "(\d+(?:\.\d+)+)\s(.*)((\(Scored\)|\(Not(\s+)Scored\)|(\(Automated\)|\(Manual\))))"
             else:
                 raise ValueError("Could not find a matching regex for {}".format(CISName))
     except IndexError:
@@ -136,7 +149,7 @@ def main():
         )
 
         # Loop through all PDF pages
-        for page in range(first_page + 1, last_page):
+        for page in range(first_page + 1, last_page + 1):
             if page < len(doc):
                 data = doc.loadPage(page).getText("text")
                 logger.info("*** Parsing Page Number: %i ***", page)
@@ -145,13 +158,23 @@ def main():
                 try:
                     rerule = re.search(pattern, data, re.DOTALL)
 
-                    if rerule is not None:
-                        full_rule = rerule.group()
-                        split_rule = full_rule.split(" ", 1)
-                        rule_id = split_rule[0]
-                        rule = split_rule[1]
+                    if rerule is None:
+                        continue
 
-                        rule_count += 1
+                    full_rule = rerule.group()
+                    split_rule = full_rule.split(" ", 1)
+                    rule_id = split_rule[0]
+                    rule = split_rule[1]
+
+                    rule_count += 1
+
+                    # Read next page into "buffer" if end of rule is not reached
+                    while (not "CIS Controls:" in data) and page < last_page:
+                        page += 1
+                        data += doc.loadPage(page).getText("text")
+
+                    logger.info("*** End of rule: %i ***", page)
+
                 except IndexError:
                     logger.info("*** Page does not contain a Rule Name ***")
                 except AttributeError:
@@ -198,12 +221,11 @@ def main():
                 except IndexError:
                     logger.info("*** Page does not contain Remediation ***")
 
-                # Get Default Value by splits as WHEN PRESENT it is always between Default Value and CIS Controls,
+                # Get Default Value by splits as WHEN PRESENT it is always between Default Value and References,
                 # Faster than regex
-                # Found to be always present in Windows 2019 but NOT in RHEL 7
                 try:
                     defval_post = data.split("Default Value:", 1)[1]
-                    defval = defval_post.partition("CIS Controls:")[0].strip()
+                    defval = defval_post.partition("References:")[0].strip()
                     defval_count += 1
                 except IndexError:
                     logger.info("*** Page does not contain Default Value ***")
@@ -222,27 +244,16 @@ def main():
                 #     logger.info("*** Page does not contain CIS Controls ***")
 
                 # We only write to csv if a parsed rule is fully assembled
-                row_count = [
-                    rule_count,
-                    level_count,
-                    description_count,
-                    rat_count,
-                    acnt,
-                    rem_count,
-                    defval_count,
-                    # cis_count,
-                ]
-
-                logging.debug(row_count)
 
                 # Have we seen this rule before? If not, write it to file
-                if row_count not in seenList:
-                    seenList = [row_count]
+                if rule_count not in seenList:
+                    seenList = seenList + [rule_count]
                     logger.info("*** Writing the following rule to csv: ***")
                     row = [rule_id, rule, level, description, rat, audit, rem, defval]
                     # row = [rule, level, description, rat, audit, rem, defval, cis]
 
                     row = replaceUF0b7(row)
+                    row = cleanHeaders(row)
 
                     logger.info(row)
                     rule_writer.writerow(row)
